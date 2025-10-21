@@ -173,6 +173,7 @@
 		mtketh-ppd = "eth0.1";
 		mtketh-lan = "eth0";
 		mtketh-max-gmac = <1>;
+                mtketh-ppe-num = <1>;
 		status = "okay";
 };
 
