@@ -1,7 +1,7 @@
 --- a/drivers/char/hw_random/mtk-rng.c
 +++ b/drivers/char/hw_random/mtk-rng.c
 @@ -231,6 +231,10 @@ static const struct mtk_rng_of_data mt79
- 	.rng_version = 2,
+ 	.rng_version = 1,
  };
  
 +static const struct mtk_rng_of_data mt7987_rng_data = {

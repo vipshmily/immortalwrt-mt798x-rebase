@@ -8,8 +8,6 @@ Subject: [PATCH] net: phy: add Airoha AN8811HB PHY driver
  drivers/net/phy/Makefile |  1 +
  2 files changed, 12 insertions(+)
 
-diff --git a/drivers/net/phy/Kconfig b/drivers/net/phy/Kconfig
-index 291d5de..b20b890 100644
 --- a/drivers/net/phy/Kconfig
 +++ b/drivers/net/phy/Kconfig
 @@ -359,6 +359,17 @@ config AIROHA_AN8801_PHY
@@ -30,8 +28,6 @@ index 291d5de..b20b890 100644
  config AIROHA_EN8801SC_PHY
  	tristate "Drivers for Airoha EN8801S Gigabit PHYs for MediaTek SoC."
  	---help---
-diff --git a/drivers/net/phy/Makefile b/drivers/net/phy/Makefile
-index 8078b11..c2d17a3 100644
 --- a/drivers/net/phy/Makefile
 +++ b/drivers/net/phy/Makefile
 @@ -75,6 +75,7 @@ ifdef CONFIG_AQUANTIA_PHY_MIB
@@ -42,6 +38,3 @@ index 8078b11..c2d17a3 100644
  obj-$(CONFIG_AIROHA_EN8801SC_PHY)	+= en8801sc.o
  air_en8811h-y := air_en8811h_main.o air_en8811h_api.o
  obj-$(CONFIG_AIROHA_EN8811H_PHY)	+= air_en8811h.o
--- 
-2.45.2
-
