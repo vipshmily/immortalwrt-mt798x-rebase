@@ -9,6 +9,11 @@ board=$(board_name)
 board_config_update
 
 case $board in
+netcore,n60-pro)
+	ucidef_set_led_netdev "wlan5g" "WLAN_5G" "blue:wlan" "rax0" "link"
+	ucidef_set_led_netdev "wan" "WAN" "blue:wan" "eth1" "link"
+	ucidef_set_led_usbport "usb" "USB" "blue:usb" "usb2-port1"
+	;;
 xiaomi,redmi-router-ax6000*)
 	ucidef_set_led_default "status" "status" "rgb:status" "1"
 	ucidef_set_led_netdev "wan" "wan" "rgb:network" "eth1"
