@@ -6,10 +6,12 @@ This repository is worked on ImmortalWrt with MTK OpenWrt Feeds patches imported
 
 ## Commit Cutoff Revisions
 
-### ImmortalWrt: [c479494](https://github.com/immortalwrt/immortalwrt/commit/c479494ab2e5a89ac31498fe02d11987e30cba89) - OpenWrt 25.12 SNAPSHOT
+### ImmortalWrt: [2777fc6](https://github.com/immortalwrt/immortalwrt/commit/2777fc61da4bbcc66b5c73769ea7bce1f868f940) - OpenWrt 25.12.3
 
 ```
-Merge Official Source
+xdp-tools: fix BPFTOOL detection
+
+Fix sh syntax error in configure script.
 
 Signed-off-by: Tianling Shen <cnsztl@immortalwrt.org>
 ```
