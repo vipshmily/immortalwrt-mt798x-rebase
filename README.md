@@ -6,7 +6,7 @@ This repository is worked on ImmortalWrt with MTK OpenWrt Feeds patches imported
 
 ## Commit Cutoff Revisions
 
-### ImmortalWrt: [cd0a06b](https://github.com/immortalwrt/immortalwrt/commit/cd0a06bfd3fdbc1011e32d35348d2ee013b4daf2)
+### ImmortalWrt: [ce35a9e](https://github.com/immortalwrt/immortalwrt/commit/ce35a9e4ef1b87fbbc2146036ce6693e4242861a)
 
 ```
 Merge Official Source
@@ -14,20 +14,32 @@ Merge Official Source
 Signed-off-by: Tianling Shen <cnsztl@immortalwrt.org>
 ```
 
-### MTK OpenWrt Feeds: [a89f844](https://git01.mediatek.com/plugins/gitiles/openwrt/feeds/mtk-openwrt-feeds/+/a89f844fc3c2d0bc07ca0a2cbdb4f67a1adc6179)
+### MTK OpenWrt Feeds: [08196fa](https://github.com/mediatek/mtk-openwrt-feeds/commit/08196fa6e5d338ce88aa0002f781e2d24289b1f1)
 
 ```
-[][openwrt-25.12][mt7988][npu][Add package]
+[HIGH][openwrt-25][MAC80211][WiFi7][Fix build failure due to license header]
 
 [Description]
-Add MediaTek NPU package to support tunnel hardware offload and some other
-network offload features.
+Fix image build failure for MP4.3 release SDK.
+
+[Root Cause]
+Relevant release patch already includes license header, while internal
+commit does not. Hence, duplicate license header is automatically
+added when transforming commit to patch, causing patching conflict.
+
+[Solution]
+Avoid adding duplicate license header.
+
+[Release-log]
+N/A
+
+[How to Verify]
+N/A
 
 [Info to Customer]
 N/A
 
-Change-Id: Id9b74e38a284dab938e5d64a45b2885ac627690a
-Reviewed-on: https://gerrit.mediatek.inc/c/openwrt/feeds/mtk_openwrt_feeds/+/12185781
+Change-Id: Ieb659d0c7763cf11ce2e63cc6bdc53cc2f674000
 ```
 
 ### l1parser: [081bb31](https://github.com/chasey-dev/l1parser/commit/081bb31211efc74594d25bfd1bb5811f3408a205)

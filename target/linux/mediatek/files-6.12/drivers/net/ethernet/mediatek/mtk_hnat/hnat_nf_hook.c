@@ -1063,8 +1063,7 @@ static void mtk_464xlat_pre_process(struct sk_buff *skb)
 		return;
 
 	foe = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-	if (foe->bfib1.state != BIND &&
-	    skb_hnat_reason(skb) == HIT_UNBIND_RATE_REACH)
+	if (foe->bfib1.state != BIND && skb_hnat_reason_ready_bind(skb))
 		memcpy(&headroom[skb_hnat_entry(skb)], skb->head,
 		       sizeof(struct hnat_desc));
 
@@ -1330,6 +1329,39 @@ bool is_eth_dev_speed_under(const struct net_device *dev, u32 speed)
 	return mac->speed <= speed;
 }
 
+static inline bool mtk_tnl_foe_valid(struct sk_buff *skb)
+{
+	struct foe_entry entry = { 0 };
+	struct tcpudphdr *pptr, _ports;
+	struct iphdr *iph;
+
+	if (!skb_hnat_is_hashed(skb) || skb_hnat_ppe(skb) >= CFG_PPE_NUM)
+		return false;
+
+	iph = ip_hdr(skb);
+	if (iph->version != IPVERSION_V4 ||
+	    (iph->protocol != IPPROTO_UDP &&
+	     iph->protocol != IPPROTO_TCP))
+		return false;
+
+	memcpy(&entry,
+	       &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)],
+	       sizeof(entry));
+
+	if (!IS_IPV4_HNAPT(&entry) || entry.bfib1.state != UNBIND)
+		return false;
+
+	pptr = skb_header_pointer(skb, iph->ihl * 4, sizeof(_ports), &_ports);
+	if (unlikely(!pptr))
+		return false;
+
+	return entry.ipv4_hnapt.sip == ntohl(iph->saddr) &&
+	       entry.ipv4_hnapt.dip == ntohl(iph->daddr) &&
+	       entry.ipv4_hnapt.sport == ntohs(pptr->src) &&
+	       entry.ipv4_hnapt.dport == ntohs(pptr->dst) &&
+	       entry.bfib1.udp == (iph->protocol == IPPROTO_UDP);
+}
+
 static unsigned int
 mtk_hnat_ipv4_nf_pre_routing(void *priv, struct sk_buff *skb,
 			     const struct nf_hook_state *state)
@@ -1352,11 +1384,16 @@ mtk_hnat_ipv4_nf_pre_routing(void *priv, struct sk_buff *skb,
 	hw_path.dev = skb->dev;
 	hw_path.virt_dev = skb->dev;
 
-	if (skb_hnat_tops(skb) && skb_hnat_is_decap(skb) &&
+	if (skb_hnat_tops(skb) &&
+	    skb_hnat_is_decap(skb) &&
 	    is_magic_tag_valid(skb) &&
 	    skb_hnat_iface(skb) == FOE_MAGIC_GE_VIRTUAL &&
-	    mtk_tnl_decap_offload && !mtk_tnl_decap_offload(skb))
+	    mtk_tnl_decap_offload &&
+	    !mtk_tnl_decap_offload(skb) &&
+	    !mtk_tnl_foe_valid(skb)) {
+		hnat_set_head_frags(state, skb, 1, hnat_set_alg);
 		return NF_ACCEPT;
+	}
 
 	/*
 	 * Avoid mistakenly binding of outer IP, ports in SW L2TP decap flow.
@@ -1424,7 +1461,7 @@ static int hnat_bridge_flood_check(struct sk_buff *skb,
 	if (!netif_is_bridge_port(in))
 		return 0;
 
-	if (skb_hnat_alg(skb) || skb_hnat_reason(skb) != HIT_UNBIND_RATE_REACH)
+	if (skb_hnat_alg(skb) || !skb_hnat_reason_ready_bind(skb))
 		return 0;
 
 	if (!is_unicast_ether_addr(eth_hdr(skb)->h_dest))
@@ -1487,11 +1524,16 @@ mtk_hnat_br_nf_local_in(void *priv, struct sk_buff *skb,
 
 	hnat_set_head_frags(state, skb, -1, hnat_set_iif);
 
-	if (skb_hnat_tops(skb) && skb_hnat_is_decap(skb) &&
+	if (skb_hnat_tops(skb) &&
+	    skb_hnat_is_decap(skb) &&
 	    is_magic_tag_valid(skb) &&
 	    skb_hnat_iface(skb) == FOE_MAGIC_GE_VIRTUAL &&
-	    mtk_tnl_decap_offload && !mtk_tnl_decap_offload(skb))
+	    mtk_tnl_decap_offload &&
+	    !mtk_tnl_decap_offload(skb) &&
+	    !mtk_tnl_foe_valid(skb)) {
+		hnat_set_head_frags(state, skb, 1, hnat_set_alg);
 		return NF_ACCEPT;
+	}
 
 	if (hnat_bridge_flood_check(skb, state->in) < 0)
 		return NF_ACCEPT;
@@ -1928,6 +1970,17 @@ static inline void hnat_fill_offload_engine_entry(struct sk_buff *skb,
 #endif /* defined(CONFIG_MEDIATEK_NETSYS_V3) */
 }
 
+/*
+ * In the encapsulation flow of certain types of tunnel, the 'struct hnat_desc' in skb headroom
+ * will be overwritten after several skb_push's invoked in different stages of linux network stack,
+ * causing HNAT binding failure. Expand the skb headroom before tunnel encapsulation to prevent it.
+ */
+static inline void hnat_tnl_skb_expand_head(struct sk_buff *skb, u32 tnl_type)
+{
+	if (tnl_type == FLOW_OFFLOAD_TNL_VXLAN)
+		pskb_expand_head(skb, sizeof(struct hnat_desc), 0, GFP_ATOMIC);
+}
+
 static int hnat_foe_entry_commit(struct foe_entry *foe,
 				 struct foe_entry *entry,
 				 u32 state)
@@ -2227,6 +2280,9 @@ hnat_skip_fill_inner:
 	hnat_foe_entry_commit(foe, &entry, BIND);
 	spin_unlock(&hnat_priv->entry_lock);
 
+	if (debug_level >= 7)
+		entry_detail(skb_hnat_ppe(skb), skb_hnat_entry(skb));
+
 	if (hnat_priv->data->per_flow_accounting &&
 	    skb_hnat_entry(skb) < hnat_priv->foe_etry_num &&
 	    skb_hnat_ppe(skb) < CFG_PPE_NUM)
@@ -2324,7 +2380,11 @@ static int skb_to_hnat_info(struct sk_buff *skb,
 	entry.bfib1.sp = foe->udib1.sp;
 #endif
 
-	if (ntohs(eth_hdr(skb)->h_proto) == ETH_P_PPP_SES) {
+	if (IS_L2_BRIDGE(&entry)) {
+		if (!l2br_toggle)
+			return -1;
+		h_proto = ntohs(eth_hdr(skb)->h_proto);
+	} else if (ntohs(eth_hdr(skb)->h_proto) == ETH_P_PPP_SES) {
 		/* Apply PPPoE Bridge packet info to hw_path for further PPE entry preparing */
 		hw_path->flags |= BIT(DEV_PATH_PPPOE);
 		hw_path->pppoe_sid = ntohs(pppoe_hdr(skb)->sid);
@@ -3027,7 +3087,7 @@ hnat_entry_bind:
 						    skb_hnat_ppe(skb),
 						    skb_hnat_entry(skb));
 		if (!flow_entry) {
-			flow_entry = kmalloc(sizeof(*flow_entry), GFP_KERNEL);
+			flow_entry = kzalloc(sizeof(*flow_entry), GFP_ATOMIC);
 			if (!flow_entry) {
 				spin_unlock_bh(&hnat_priv->flow_entry_lock);
 				return -1;
@@ -3071,6 +3131,9 @@ hnat_entry_bind:
 	}
 	hnat_foe_entry_commit(foe, &entry, BIND);
 	spin_unlock_bh(&hnat_priv->entry_lock);
+
+	if (debug_level >= 7)
+		entry_detail(skb_hnat_ppe(skb), skb_hnat_entry(skb));
 
 	if (hnat_bind_callback && IS_HNAT_API_SUPPORTED(&entry))
 		hnat_trigger_callback(hnat_bind_callback, skb);
@@ -3122,7 +3185,7 @@ int mtk_sw_nat_hook_tx(struct sk_buff *skb, int gmac_no)
 	if (unlikely(!skb_mac_header_was_set(skb)))
 		return NF_ACCEPT;
 
-	if (skb_hnat_reason(skb) != HIT_UNBIND_RATE_REACH)
+	if (!skb_hnat_reason_ready_bind(skb))
 		return NF_ACCEPT;
 
 	spin_lock_bh(&hnat_priv->flow_entry_lock);
@@ -3426,6 +3489,9 @@ int mtk_sw_nat_hook_tx(struct sk_buff *skb, int gmac_no)
 	hnat_foe_entry_commit(hw_entry, &entry, BIND);
 	spin_unlock_bh(&hnat_priv->entry_lock);
 
+	if (debug_level >= 7)
+		entry_detail(skb_hnat_ppe(skb), skb_hnat_entry(skb));
+
 	if (hnat_bind_callback && IS_HNAT_API_SUPPORTED(&entry))
 		hnat_trigger_callback(hnat_bind_callback, skb);
 
@@ -3447,48 +3513,6 @@ int mtk_sw_nat_hook_tx(struct sk_buff *skb, int gmac_no)
 			skb_hnat_wc_id(skb), skb_hnat_entry(skb),
 			skb_hnat_sport(skb));
 
-		if (IS_IPV4_GRP(&entry)) {
-			pr_info("%s %d dp:%d rxid:%d tid:%d uinfo:%d bssid:%d wcid:%d hsh-idx:%d sp:%d\n",
-				__func__, __LINE__,
-				(hw_entry->ipv4_hnapt.iblk2.dp),
-				(hw_entry->ipv4_hnapt.iblk2.rxid),
-				(hw_entry->ipv4_hnapt.winfo_pao.tid),
-				(hw_entry->ipv4_hnapt.winfo_pao.usr_info),
-				(hw_entry->ipv4_hnapt.winfo.bssid),
-				(hw_entry->ipv4_hnapt.winfo.wcid),
-				skb_hnat_entry(skb), skb_hnat_sport(skb));
-			pr_info("%s %d dip:%x sip:%x dp:%x sp:%x hsh-idx:%d\n",
-				__func__, __LINE__,
-				hw_entry->ipv4_hnapt.dip, hw_entry->ipv4_hnapt.sip,
-				hw_entry->ipv4_hnapt.dport, hw_entry->ipv4_hnapt.sport,
-				skb_hnat_entry(skb));
-			pr_info("%s %d new_dip:%x new_sip:%x new_dp:%x new_sp:%x hsh-idx:%d\n",
-				__func__, __LINE__,
-				hw_entry->ipv4_hnapt.new_dip, hw_entry->ipv4_hnapt.new_sip,
-				hw_entry->ipv4_hnapt.new_dport,
-				hw_entry->ipv4_hnapt.new_sport, skb_hnat_entry(skb));
-		} else {
-			pr_info("%s %d dp:%d rxid:%d tid:%d uinfo:%d bssid:%d wcid:%d hidx:%d sp:%d\n",
-				__func__, __LINE__,
-				(hw_entry->ipv6_5t_route.iblk2.dp),
-				(hw_entry->ipv6_5t_route.iblk2.rxid),
-				(hw_entry->ipv6_5t_route.winfo_pao.tid),
-				(hw_entry->ipv6_5t_route.winfo_pao.usr_info),
-				(hw_entry->ipv6_5t_route.winfo.bssid),
-				(hw_entry->ipv6_5t_route.winfo.wcid),
-				skb_hnat_entry(skb), skb_hnat_sport(skb));
-			pr_info("sip:%x-:%x-:%x-:%x dip0:%x-:%x-:%x-:%x dport:%x sport:%x\n",
-				hw_entry->ipv6_5t_route.ipv6_sip0,
-				hw_entry->ipv6_5t_route.ipv6_sip1,
-				hw_entry->ipv6_5t_route.ipv6_sip2,
-				hw_entry->ipv6_5t_route.ipv6_sip3,
-				hw_entry->ipv6_5t_route.ipv6_dip0,
-				hw_entry->ipv6_5t_route.ipv6_dip1,
-				hw_entry->ipv6_5t_route.ipv6_dip2,
-				hw_entry->ipv6_5t_route.ipv6_dip3,
-				hw_entry->ipv6_5t_route.dport,
-				hw_entry->ipv6_5t_route.sport);
-		}
 	}
 #endif
 	return NF_ACCEPT;
@@ -3505,6 +3529,7 @@ int mtk_sw_nat_hook_rx(struct sk_buff *skb)
 	skb_hnat_filled(skb) = 0;
 	skb_hnat_set_tops(skb, 0);
 	skb_hnat_set_cdrt(skb, 0);
+	skb_hnat_set_is_pppoe(skb, 0);
 	skb_hnat_set_is_decrypt(skb, 0);
 	skb_hnat_magic_tag(skb) = HNAT_MAGIC_TAG;
 
@@ -3907,7 +3932,9 @@ static int mtk_464xlat_post_process(struct sk_buff *skb, const struct net_device
 	if (hash >= hnat_priv->foe_etry_num)
 		return -1;
 
-	if (headroom[hash].crsn != HIT_UNBIND_RATE_REACH)
+	if (headroom[hash].crsn != HIT_UNBIND_RATE_REACH &&
+	    !(hnat_priv->bind_threshold <= 1 &&
+	      headroom[hash].crsn == HIT_UNBIND))
 		return -1;
 
 	foe = &hnat_priv->foe_table_cpu[headroom_ppe(headroom[hash])][hash];
@@ -3954,7 +3981,7 @@ static unsigned int mtk_hnat_nf_post_routing(
 	if (unlikely(!skb_hnat_is_hashed(skb)))
 		return 0;
 
-	if (unlikely(skb->mark == HNAT_EXCEPTION_TAG))
+	if (unlikely(skb->mark & HNAT_EXCEPTION_BIT))
 		return 0;
 
 	/* Get bond device slave for the following binding flow */
@@ -3973,9 +4000,10 @@ static unsigned int mtk_hnat_nf_post_routing(
 		if (hw_path.flags & BIT(DEV_PATH_TNL) && mtk_tnl_encap_offload) {
 			if (ntohs(skb->protocol) == ETH_P_IP &&
 			    (ip_hdr(skb)->protocol == IPPROTO_TCP ||
-			     ip_hdr(skb)->protocol == IPPROTO_UDP))
+			     ip_hdr(skb)->protocol == IPPROTO_UDP)) {
 				skb_hnat_set_tops(skb, hw_path.tnl_type + 1);
-			else {
+				hnat_tnl_skb_expand_head(skb, hw_path.tnl_type);
+			} else {
 				skb_hnat_alg(skb) = 1;
 				return 0;
 			}
@@ -4002,10 +4030,21 @@ static unsigned int mtk_hnat_nf_post_routing(
 
 	switch (skb_hnat_reason(skb)) {
 	case TCP_FIN_SYN_RST:
-		if (hnat_fin_callback && entry->bfib1.state == FIN &&
-		    IS_HNAT_API_SUPPORTED(entry))
+		/* only FIN/RST alerts matter */
+		if (entry_hnat_state(entry) != FIN)
+			break;
+
+		/* Get the last MIB delta before FIN_AGE reclaims the entry. */
+		if (hnat_priv->data->per_flow_accounting)
+			hnat_get_count(hnat_priv, skb_hnat_ppe(skb), skb_hnat_entry(skb), NULL);
+
+		if (hnat_fin_callback && IS_HNAT_API_SUPPORTED(entry))
 			hnat_trigger_callback(hnat_fin_callback, skb);
 		break;
+	case HIT_UNBIND:
+		if (!skb_hnat_reason_ready_bind(skb))
+			break;
+		fallthrough;
 	case HIT_UNBIND_RATE_REACH:
 		if (entry_hnat_is_bound(entry))
 			break;
@@ -4103,7 +4142,7 @@ mtk_hnat_ipv6_nf_local_out(void *priv, struct sk_buff *skb,
 		return NF_ACCEPT;
 
 	entry = &hnat_priv->foe_table_cpu[skb_hnat_ppe(skb)][skb_hnat_entry(skb)];
-	if (skb_hnat_reason(skb) == HIT_UNBIND_RATE_REACH) {
+	if (skb_hnat_reason_ready_bind(skb)) {
 		ip6h = ipv6_hdr(skb);
 		if (ip6h->nexthdr == NEXTHDR_IPIP) {
 			/* Map-E LAN->WAN: need to record orig info before fn. */
@@ -4458,13 +4497,3 @@ int mtk_hqos_ptype_cb(struct sk_buff *skb, struct net_device *dev,
 	return 0;
 }
 
-int mtk_hnat_skb_headroom_copy(struct sk_buff *new, struct sk_buff *old)
-{
-	if (skb_headroom(new) < skb_headroom(old))
-		return -EPERM;
-
-	if (skb_hnat_reason(old) == HIT_UNBIND_RATE_REACH && skb_hnat_tops(old))
-		memcpy(new->head, old->head, skb_headroom(old));
-
-	return 0;
-}
